@@ -37,18 +37,18 @@ LOG = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "footage-
 
 # Proxy presets: label -> (extension, video args, audio args)
 PROXY_FORMATS = {
-    "H.264 all-intra (.mp4, small, smooth scrubbing)": (
+    "ProRes 422 Proxy (.mov) — works in Resolve, Premiere, Kdenlive": (
+        "mov",
+        ["-c:v", "prores_ks", "-profile:v", "0", "-vendor", "apl0", "-pix_fmt", "yuv422p10le"],
+        ["-c:a", "pcm_s16le"],
+    ),
+    "H.264 all-intra (.mp4, smallest) — not readable by free Resolve on Linux": (
         "mp4",
         ["-c:v", "libx264", "-preset", "veryfast", "-tune", "fastdecode", "-crf", "23",
          "-g", "1", "-bf", "0", "-pix_fmt", "yuv420p"],
         ["-c:a", "aac", "-b:a", "160k"],
     ),
-    "ProRes 422 Proxy (.mov, larger, very light to decode)": (
-        "mov",
-        ["-c:v", "prores_ks", "-profile:v", "0", "-vendor", "apl0", "-pix_fmt", "yuv422p10le"],
-        ["-c:a", "pcm_s16le"],
-    ),
-    "DNxHR LB (.mov, larger, very light to decode)": (
+    "DNxHR LB (.mov) — works in Resolve, Premiere, Kdenlive": (
         "mov",
         ["-c:v", "dnxhd", "-profile:v", "dnxhr_lb", "-pix_fmt", "yuv422p"],
         ["-c:a", "pcm_s16le"],

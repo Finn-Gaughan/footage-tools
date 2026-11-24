@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.0 — 2026-11-24
+- Default proxy format is now ProRes 422 Proxy so proxies work in Resolve (incl. free on Linux),
+  Premiere and Kdenlive. H.264 labelled as not readable by free Resolve on Linux.
+- README: how to attach proxies in Resolve and Premiere.
+
 ## 2.0.0 — 2026-11-24
 - New **Footage tools…** right-click window (PyQt6) replacing the four-entry submenu.
 - Dialogue leveling can now write into a subfolder (`level-dialogue --outdir DIR`).

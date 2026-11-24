@@ -15,7 +15,7 @@ right-click → **Footage tools…**, tick what you want, press **Run**.
 | Save to: replace originals | Original moves to the Trash, leveled file takes its place (asks first, never remembered as the default). |
 | **Make editing proxies** | Low-res, edit-friendly copies in a `Proxy/` subfolder, same base name as the clip. If leveling is on, the proxy is made from the leveled file (so it sits in `Leveled/Proxy/` and carries the leveled audio). |
 
-Proxy formats: H.264 all-intra `.mp4` (default, small), ProRes 422 Proxy `.mov`, DNxHR LB `.mov`.
+Proxy formats: ProRes 422 Proxy `.mov` (default), DNxHR LB `.mov`, H.264 all-intra `.mp4` (smallest, but the free DaVinci Resolve on Linux cannot decode H.264 or AAC).
 Sizes: 540p (default), 720p, 1080p, half, quarter. Portrait clips scale by their short side; never upscales.
 
 Your choices are remembered between runs (`~/.config/footage-tools/footage-tools.conf`).
@@ -52,7 +52,10 @@ level-dialogue [--strength gentle|normal|strong] [--target -14] [--denoise]
 
 - **Kdenlive:** Settings → Configure Kdenlive → Proxy Clips → enable *external proxy clips* and add a
   profile with proxy folder `Proxy/`, no prefix, and the proxy extension (`.mp4` or `.mov`) as suffix.
-- **DaVinci Resolve:** proxies in a `Proxy` folder beside the media with the same name are what
-  Resolve's *Link Proxy Media* expects.
+- **DaVinci Resolve:** right-click clips in the Media Pool → *Link Proxy Media* and pick the
+  `Proxy` folder; files are matched by name. Use ProRes or DNxHR: the free Resolve on Linux
+  can't decode H.264 or AAC.
+- **Premiere Pro:** select clips → right-click → *Proxy → Attach Proxies*, point at the `Proxy`
+  folder. Proxies keep the original frame rate and audio-track layout, which Premiere requires.
 
 See [SPEC.md](SPEC.md) for the intended behaviour and [CHANGELOG.md](CHANGELOG.md) for history.
