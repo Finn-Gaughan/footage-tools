@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2.3.0 — 2026-11-24
+- Old “Level dialogue” submenu retired on Finn's machine (`install.sh --replace-legacy`).
 - Popup when leveled files or proxies already exist in the destination: Replace / Skip existing / Cancel.
   Replaces the “Overwrite existing proxies” checkbox.
 
