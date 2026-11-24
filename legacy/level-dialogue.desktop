@@ -1,0 +1,26 @@
+[Desktop Entry]
+Type=Service
+MimeType=video/*;audio/*;
+Actions=keep;keepDenoise;replace;replaceDenoise;
+X-KDE-Submenu=Level dialogue
+Icon=audio-volume-high
+
+[Desktop Action keep]
+Name=Level dialogue (save as new files)
+Icon=document-save-as
+Exec=sh -c '"$HOME/.local/bin/level-dialogue" --gui "$@"' _ %F
+
+[Desktop Action keepDenoise]
+Name=Level dialogue + denoise (save as new files)
+Icon=document-save-as
+Exec=sh -c '"$HOME/.local/bin/level-dialogue" --gui --denoise "$@"' _ %F
+
+[Desktop Action replace]
+Name=Level dialogue (replace originals)
+Icon=edit-replace
+Exec=sh -c 'kdialog --title "Level dialogue" --warningcontinuecancel "Replace $# original file(s)?\n\nOriginals will be moved to the Trash." && "$HOME/.local/bin/level-dialogue" --gui --replace "$@"' _ %F
+
+[Desktop Action replaceDenoise]
+Name=Level dialogue + denoise (replace originals)
+Icon=edit-replace
+Exec=sh -c 'kdialog --title "Level dialogue" --warningcontinuecancel "Replace $# original file(s)?\n\nOriginals will be moved to the Trash." && "$HOME/.local/bin/level-dialogue" --gui --replace --denoise "$@"' _ %F

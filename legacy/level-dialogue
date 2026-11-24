@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# level-dialogue — make dialogue consistently audible across video/audio files.
+#
+# Video streams are copied bit-for-bit (never re-encoded); only the audio is processed:
+#   high-pass -> (optional denoise) -> dynamic leveling -> gentle compression
+#   -> two-pass EBU R128 loudness normalization -> true-peak safety limiter
+#
+# Usage: level-dialogue [options] FILE...
+#   -r, --replace        replace originals (originals are moved to the Trash, not deleted)
+#   -d, --denoise        add light FFT noise reduction (for hissy/noisy footage)
+#   -s, --strength S     leveling strength: gentle | normal (default) | strong
+#   -t, --target LUFS    integrated loudness target (default -14, YouTube's reference)
+#   -g, --gui            report progress/results with desktop notifications and dialogs
+#   -h, --help
+#
+# Without --replace, output is written next to each file as NAME.leveled.EXT
+
+set -uo pipefail
+
+TARGET=-14
+TRUE_PEAK=-1.5
+LRA=7
+REPLACE=0
+DENOISE=0
+STRENGTH=normal
+GUI=0
+LOG="${XDG_CACHE_HOME:-$HOME/.cache}/level-dialogue.log"
+
+usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+files=()
+while (($#)); do
+  case "$1" in
+    -r|--replace)  REPLACE=1 ;;
+    -d|--denoise)  DENOISE=1 ;;
+    -s|--strength) STRENGTH="${2:-}"; shift ;;
+    -t|--target)   TARGET="${2:-}"; shift ;;
+    -g|--gui)      GUI=1 ;;
+    -h|--help)     usage 0 ;;
+    --)            shift; files+=("$@"); break ;;
+    -*)            echo "Unknown option: $1" >&2; usage 1 ;;
+    *)             files+=("$1") ;;
+  esac
+  shift
+done
+((${#files[@]})) || usage 1
+
+case "$STRENGTH" in
+  gentle) LEVELER="dynaudnorm=f=400:g=21:p=0.9:m=4:s=0";  COMP="acompressor=threshold=-18dB:ratio=2:attack=10:release=200" ;;
+  normal) LEVELER="dynaudnorm=f=250:g=15:p=0.9:m=8:s=0";  COMP="acompressor=threshold=-20dB:ratio=3:attack=5:release=150" ;;
+  strong) LEVELER="dynaudnorm=f=150:g=9:p=0.9:m=15:s=0";  COMP="acompressor=threshold=-24dB:ratio=4:attack=3:release=100" ;;
+  *) echo "Strength must be gentle, normal or strong" >&2; exit 1 ;;
+esac
+
+PRE="highpass=f=80:poles=2"
+((DENOISE)) && PRE+=",afftdn=nr=10:nf=-40:tn=1"
+PRE+=",$LEVELER,$COMP"
+
+mkdir -p "$(dirname "$LOG")"
+log()    { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; ((GUI)) || echo "$*" >&2; }
+notify() { ((GUI)) && notify-send -a "Level dialogue" -i audio-volume-high "$@" 2>/dev/null; true; }
+
+# Pick an audio encoder that suits the container.
+audio_codec() {
+  case "${1,,}" in
+    webm|ogg|opus) echo "-c:a libopus -b:a 160k" ;;
+    mp3)           echo "-c:a libmp3lame -b:a 256k" ;;
+    flac)          echo "-c:a flac" ;;
+    wav)           echo "-c:a pcm_s24le" ;;
+    *)             echo "-c:a aac -b:a 256k" ;;   # mp4, mov, mkv, m4a, ...
+  esac
+}
+
+trash() {
+  if command -v kioclient >/dev/null; then kioclient move "$1" trash:/ >/dev/null 2>&1 && return 0; fi
+  if command -v gio >/dev/null;       then gio trash "$1" && return 0; fi
+  return 1
+}
+
+process() {
+  local in="$1" dir base ext out tmp sr ch json I LRA_M TP TH OFF codec
+  [[ -f "$in" ]] || { log "SKIP (not a file): $in"; return 1; }
+  dir=$(dirname -- "$in"); base=$(basename -- "$in"); ext="${base##*.}"; base="${base%.*}"
+  [[ "$base" == *.leveled ]] && { log "SKIP (already leveled): $in"; return 2; }
+
+  sr=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 -- "$in")
+  ch=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels    -of csv=p=0 -- "$in")
+  [[ -n "$sr" ]] || { log "SKIP (no audio): $in"; return 2; }
+
+  # Pass 1: measure loudness after the leveling chain.
+  json=$(ffmpeg -hide_banner -nostdin -i "$in" -map 0:a:0 -vn -sn -dn \
+           -af "$PRE,loudnorm=I=$TARGET:TP=$TRUE_PEAK:LRA=$LRA:print_format=json" \
+           -f null - 2>&1 | sed -n '/^{/,/^}/p')
+  get() { grep -oP "\"$1\"\\s*:\\s*\"\\K[^\"]+" <<<"$json"; }
+  I=$(get input_i); LRA_M=$(get input_lra); TP=$(get input_tp); TH=$(get input_thresh); OFF=$(get target_offset)
+  if [[ -z "$I" || "$I" == "-inf" ]]; then log "FAIL (could not measure audio / silent): $in"; return 1; fi
+
+  # Pass 2: apply chain + linear loudness correction, copy everything else untouched.
+  tmp="$dir/.${base}.leveling.$$.$ext"
+  out="$dir/$base.leveled.$ext"
+  codec=$(audio_codec "$ext")
+  local extra=()
+  [[ "${ext,,}" =~ ^(mp4|mov|m4a|m4v)$ ]] && extra+=(-movflags +faststart)
+  [[ "${ext,,}" =~ ^(mkv|webm)$ ]] && extra+=(-map '0:s?' -map '0:t?')
+
+  # shellcheck disable=SC2086
+  if ! ffmpeg -hide_banner -nostdin -loglevel error -y -i "$in" \
+        -filter_complex "[0:a:0]$PRE,loudnorm=I=$TARGET:TP=$TRUE_PEAK:LRA=$LRA:measured_I=$I:measured_LRA=$LRA_M:measured_TP=$TP:measured_thresh=$TH:offset=$OFF:linear=true,alimiter=limit=0.84:level=false,aresample=$sr[a]" \
+        -map '0:v?' -map '[a]' "${extra[@]}" \
+        -map_metadata 0 -map_chapters 0 \
+        -c copy $codec -ac "$ch" \
+        "$tmp" 2>>"$LOG"; then
+    rm -f -- "$tmp"; log "FAIL (encode error, see log): $in"; return 1
+  fi
+  touch -r "$in" -- "$tmp"   # keep original modification time
+
+  if ((REPLACE)); then
+    if ! trash "$in"; then rm -f -- "$tmp"; log "FAIL (could not move original to Trash): $in"; return 1; fi
+    mv -f -- "$tmp" "$in"
+    log "OK  $in  (was ${I} LUFS -> ${TARGET} LUFS, original in Trash)"
+  else
+    mv -f -- "$tmp" "$out"
+    log "OK  $out  (was ${I} LUFS -> ${TARGET} LUFS)"
+  fi
+}
+
+total=${#files[@]}; ok=0; failed=(); n=0
+notify "Leveling dialogue" "Processing $total file(s)…"
+for f in "${files[@]}"; do
+  n=$((n+1))
+  ((GUI)) || echo "[$n/$total] $(basename -- "$f")" >&2
+  process "$f"; rc=$?
+  if ((rc==0)); then ok=$((ok+1)); ((total>1)) && notify "Leveled $n/$total" "$(basename -- "$f")"
+  elif ((rc==1)); then failed+=("$(basename -- "$f")"); fi
+done
+
+summary="$ok of $total file(s) leveled."
+((${#failed[@]})) && summary+=$'\n\nFailed:\n'"$(printf '  %s\n' "${failed[@]}")"$'\n\nDetails: '"$LOG"
+if ((GUI)); then
+  if ((${#failed[@]})); then kdialog --title "Level dialogue" --sorry "$summary" 2>/dev/null
+  else notify "Dialogue leveling done" "$summary"; fi
+else
+  echo "$summary" >&2
+fi
+((${#failed[@]}==0))
