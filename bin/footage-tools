@@ -113,6 +113,7 @@ class Job:
     denoise: bool
     target: float
     out_mode: str          # "beside" | "subfolder" | "replace"
+    name_tags: bool
     level_folder: str
     proxy: bool
     proxy_format: str
@@ -151,6 +152,8 @@ class Worker(QObject):
         cmd = [str(LEVEL_SCRIPT), "--strength", j.strength, "--target", f"{j.target:g}"]
         if j.denoise:
             cmd.append("--denoise")
+        if j.name_tags:
+            cmd.append("--name-tags")
         if j.out_mode == "replace":
             cmd.append("--replace")
             out = src
@@ -172,7 +175,9 @@ class Worker(QObject):
         status = lines[-1] if lines else (err.strip().splitlines() or ["FAIL (unknown error)"])[-1]
         self.message.emit("    " + status)
         if status.startswith("OK"):
-            return "ok", out
+            # the script reports the path it actually wrote: "OK  <path>  (was ...)"
+            reported = status[2:].split("  (was", 1)[0].strip()
+            return "ok", Path(reported) if reported else out
         if status.startswith("SKIP"):
             return "skip", None
         return "fail", None
@@ -325,6 +330,9 @@ class Window(QWidget):
         ov.addWidget(self.out_beside)
         ov.addWidget(self.out_replace)
         fl.addRow("Save to:", out_w)
+        self.name_tags = QCheckBox("Put the settings in the filename (e.g. clip.leveled_normal_-14LUFS.mp4)")
+        fl.addRow("", self.name_tags)
+        self.out_replace.toggled.connect(lambda on: self.name_tags.setEnabled(not on))
         self.out_sub.toggled.connect(self.level_folder.setEnabled)
         v.addWidget(self.level_box)
 
@@ -342,8 +350,9 @@ class Window(QWidget):
         pl.addRow("Subfolder:", self.proxy_folder)
         self.proxy_overwrite = QCheckBox("Overwrite existing proxies")
         pl.addRow("", self.proxy_overwrite)
-        note = QLabel("Proxies are named like the clip they belong to (the leveled file when "
-                      "leveling is on), so editors can match them automatically.")
+        note = QLabel("Proxies keep exactly the same name as the clip they belong to (the leveled "
+                      "file when leveling is on). Resolve, Premiere and Kdenlive match proxies by name, "
+                      "so the Proxy folder is what marks them as proxies.")
         note.setWordWrap(True)
         note.setEnabled(False)  # greyed-out hint text
         pl.addRow(note)
@@ -408,6 +417,7 @@ class Window(QWidget):
         mode = s.value("level/out_mode", "subfolder")
         {"subfolder": self.out_sub, "beside": self.out_beside, "replace": self.out_beside}[mode].setChecked(True)
         self.level_folder.setText(s.value("level/folder", "Leveled"))
+        self.name_tags.setChecked(b("level/name_tags", True))
         self.level_folder.setEnabled(self.out_sub.isChecked())
         self.proxy_box.setChecked(b("proxy/enabled", False))
         fmt = s.value("proxy/format", next(iter(PROXY_FORMATS)))
@@ -423,6 +433,7 @@ class Window(QWidget):
         return Job(
             level=self.level_box.isChecked(), strength=self.strength.currentText(),
             denoise=self.denoise.isChecked(), target=self.target.value(), out_mode=mode,
+            name_tags=self.name_tags.isChecked(),
             level_folder=self.level_folder.text().strip() or "Leveled",
             proxy=self.proxy_box.isChecked(), proxy_format=self.proxy_format.currentText(),
             proxy_size=self.proxy_size.currentText(),
@@ -439,6 +450,7 @@ class Window(QWidget):
         # "replace" is deliberately never remembered, so it can't happen by accident next time
         s.setValue("level/out_mode", j.out_mode if j.out_mode != "replace" else "subfolder")
         s.setValue("level/folder", j.level_folder)
+        s.setValue("level/name_tags", j.name_tags)
         s.setValue("proxy/enabled", j.proxy)
         s.setValue("proxy/format", j.proxy_format)
         s.setValue("proxy/size", j.proxy_size)

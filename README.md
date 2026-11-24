@@ -10,10 +10,11 @@ right-click → **Footage tools…**, tick what you want, press **Run**.
 | Option | What happens |
 |---|---|
 | **Level dialogue** | Makes speech consistently audible: high-pass → optional denoise → dynamic leveling → compression → two-pass EBU R128 loudness normalisation → true-peak limiter. Video is copied bit-for-bit, never re-encoded. |
-| Save to: subfolder (default) | `clip.mp4` → `Leveled/clip.mp4` |
-| Save to: beside originals | `clip.mp4` → `clip.leveled.mp4` |
+| Save to: subfolder (default) | `clip.mp4` → `Leveled/clip.leveled_normal_-14LUFS.mp4` |
+| Save to: beside originals | `clip.mp4` → `clip.leveled_normal_-14LUFS.mp4` |
+| Settings in filename (default on) | Adds strength, `denoise` if used, and the loudness target to the name. Turn it off for plain `Leveled/clip.mp4` / `clip.leveled.mp4`. |
 | Save to: replace originals | Original moves to the Trash, leveled file takes its place (asks first, never remembered as the default). |
-| **Make editing proxies** | Low-res, edit-friendly copies in a `Proxy/` subfolder, same base name as the clip. If leveling is on, the proxy is made from the leveled file (so it sits in `Leveled/Proxy/` and carries the leveled audio). |
+| **Make editing proxies** | Low-res, edit-friendly copies in a `Proxy/` subfolder with exactly the same base name as the clip (editors match proxies by name, so proxy settings are never added to the name). If leveling is on, the proxy is made from the leveled file (so it sits in `Leveled/Proxy/` and carries the leveled audio). |
 
 Proxy formats: ProRes 422 Proxy `.mov` (default), DNxHR LB `.mov`, H.264 all-intra `.mp4` (smallest, but the free DaVinci Resolve on Linux cannot decode H.264 or AAC).
 Sizes: 540p (default), 720p, 1080p, half, quarter. Portrait clips scale by their short side; never upscales.
@@ -38,7 +39,7 @@ This symlinks `bin/footage-tools` into `~/.local/bin` and adds the Dolphin servi
 
 ```
 level-dialogue [--strength gentle|normal|strong] [--target -14] [--denoise]
-               [--outdir Leveled | --replace] FILE...
+               [--outdir Leveled | --replace] [--name-tags] FILE...
 ```
 
 `footage-tools FILE...` opens the window.

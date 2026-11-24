@@ -12,6 +12,8 @@
 #   -t, --target LUFS    integrated loudness target (default -14, YouTube's reference)
 #   -o, --outdir DIR     write output into DIR (relative paths are resolved against each
 #                        file's own folder, e.g. "Leveled"); output keeps the original name
+#   -n, --name-tags      put the settings in the output name, e.g.
+#                        NAME.leveled_normal_denoise_-14LUFS.EXT (ignored with --replace)
 #   -g, --gui            report progress/results with desktop notifications and dialogs
 #   -h, --help
 #
@@ -27,9 +29,10 @@ DENOISE=0
 STRENGTH=normal
 GUI=0
 OUTDIR=
+TAGS=0
 LOG="${XDG_CACHE_HOME:-$HOME/.cache}/level-dialogue.log"
 
-usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 files=()
 while (($#)); do
@@ -39,6 +42,7 @@ while (($#)); do
     -s|--strength) STRENGTH="${2:-}"; shift ;;
     -t|--target)   TARGET="${2:-}"; shift ;;
     -o|--outdir)   OUTDIR="${2:-}"; shift ;;
+    -n|--name-tags) TAGS=1 ;;
     -g|--gui)      GUI=1 ;;
     -h|--help)     usage 0 ;;
     --)            shift; files+=("$@"); break ;;
@@ -85,7 +89,7 @@ process() {
   local in="$1" dir base ext out tmp sr ch json I LRA_M TP TH OFF codec
   [[ -f "$in" ]] || { log "SKIP (not a file): $in"; return 1; }
   dir=$(dirname -- "$in"); base=$(basename -- "$in"); ext="${base##*.}"; base="${base%.*}"
-  [[ "$base" == *.leveled ]] && { log "SKIP (already leveled): $in"; return 2; }
+  [[ "$base" == *.leveled || "$base" == *.leveled_* ]] && { log "SKIP (already leveled): $in"; return 2; }
 
   sr=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 -- "$in")
   ch=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels    -of csv=p=0 -- "$in")
@@ -106,6 +110,12 @@ process() {
     mkdir -p -- "$odir" || { log "FAIL (could not create $odir): $in"; return 1; }
     oname="$base.$ext"
     [[ "$(realpath -- "$odir")" == "$(realpath -- "$dir")" ]] && oname="$base.leveled.$ext"
+  fi
+  if ((TAGS)); then
+    local tag="leveled_${STRENGTH}"
+    ((DENOISE)) && tag+="_denoise"
+    tag+="_${TARGET}LUFS"
+    oname="$base.$tag.$ext"
   fi
   tmp="$odir/.${base}.leveling.$$.$ext"
   out="$odir/$oname"

@@ -29,11 +29,13 @@ exactly what to do to the selected footage, then runs it with visible progress.
   original modification time are kept.
 - Output: subfolder (default `Leveled/`, same filename) | beside (`NAME.leveled.EXT`) | replace
   (original to Trash).
-- Files with no audio, or already named `*.leveled.*`, are skipped (not failures).
+- Option (default on): put the settings in the output name —
+  `NAME.leveled_<strength>[_denoise]_<target>LUFS.EXT`. Not applied when replacing originals.
+- Files with no audio, or already named `*.leveled.*` / `*.leveled_*.*`, are skipped (not failures).
 
 ### Proxies
 - Written to a subfolder (default `Proxy/`) next to the clip they belong to, named
-  `<clip base name>.<proxy ext>`.
+  `<clip base name>.<proxy ext>`. Never add tags to proxy names: editors link proxies by name.
 - The clip they belong to is the leveled output when leveling ran, otherwise the original.
 - Must work in DaVinci Resolve (incl. free version on Linux), Premiere Pro and Kdenlive.
 - Formats: ProRes 422 Proxy (10-bit 4:2:2, PCM) `.mov` — default; DNxHR LB (4:2:2, PCM) `.mov`;
