@@ -314,7 +314,7 @@ class Window(QWidget):
         fl.addRow("", self.denoise)
 
         self.out_group = QButtonGroup(self)
-        self.out_beside = QRadioButton("Beside originals (NAME.leveled.ext)")
+        self.out_beside = QRadioButton("Beside originals")
         self.out_sub = QRadioButton("Into a subfolder:")
         self.out_replace = QRadioButton("Replace originals (originals go to the Trash)")
         self.level_folder = QLineEdit()
