@@ -19,6 +19,10 @@ right-click → **Footage tools…**, tick what you want, press **Run**.
 Proxy formats: ProRes 422 Proxy `.mov` (default), DNxHR LB `.mov`, H.264 all-intra `.mp4` (smallest, but the free DaVinci Resolve on Linux cannot decode H.264 or AAC).
 Sizes: 540p (default), 720p, 1080p, half, quarter. Portrait clips scale by their short side; never upscales.
 
+If leveled files or proxies already exist where the output would go, a popup lists them and asks
+whether to **Replace** or **Skip existing** (asked separately for leveled files and proxies).
+Skipped leveled files are still used as the source for new proxies.
+
 Your choices are remembered between runs (`~/.config/footage-tools/footage-tools.conf`).
 
 ## Install

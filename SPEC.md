@@ -43,7 +43,10 @@ exactly what to do to the selected footage, then runs it with visible progress.
 - Frame rate and audio-track count/channels must match the source (Premiere attach requirement).
 - Size by short side (540/720/1080) or fraction (½, ¼); never upscale; dimensions even.
 - All audio tracks are kept so editors see the same track layout.
-- Existing proxies are skipped unless “Overwrite existing proxies” is ticked.
+- Existing outputs: before the run, check every planned leveled file and proxy. If any exist,
+  show one popup per type (leveled / proxies) listing them, with Replace / Skip existing
+  (default) / Cancel. Skipping a leveled file still uses it as the proxy source. Replace
+  overwrites the old output only after the new one has been written successfully.
 - Audio-only files are skipped for proxies.
 
 ## Open questions / ideas

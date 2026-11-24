@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.3.0 — 2026-11-24
+- Popup when leveled files or proxies already exist in the destination: Replace / Skip existing / Cancel.
+  Replaces the “Overwrite existing proxies” checkbox.
+
 ## 2.2.0 — 2026-11-24
 - Leveled files can carry their settings in the name, e.g. `clip.leveled_normal_denoise_-14LUFS.mp4`
   (on by default; `level-dialogue --name-tags`).
