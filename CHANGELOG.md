@@ -1,0 +1,12 @@
+# Changelog
+
+## 2.0.0 — 2026-11-24
+- New **Footage tools…** right-click window (PyQt6) replacing the four-entry submenu.
+- Dialogue leveling can now write into a subfolder (`level-dialogue --outdir DIR`).
+- New: editing proxies (H.264 all-intra, ProRes Proxy, DNxHR LB) in a `Proxy/` subfolder.
+- Progress, cancel, remembered settings, “open output folder”.
+- `install.sh` (symlink install; `--replace-legacy` to retire the old submenu).
+
+## 1.0.0 — 2026-11-15
+- Original `level-dialogue` script and “Level dialogue” Dolphin submenu
+  (save as new / replace, with or without denoise).

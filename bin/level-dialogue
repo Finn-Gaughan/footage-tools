@@ -10,10 +10,12 @@
 #   -d, --denoise        add light FFT noise reduction (for hissy/noisy footage)
 #   -s, --strength S     leveling strength: gentle | normal (default) | strong
 #   -t, --target LUFS    integrated loudness target (default -14, YouTube's reference)
+#   -o, --outdir DIR     write output into DIR (relative paths are resolved against each
+#                        file's own folder, e.g. "Leveled"); output keeps the original name
 #   -g, --gui            report progress/results with desktop notifications and dialogs
 #   -h, --help
 #
-# Without --replace, output is written next to each file as NAME.leveled.EXT
+# Without --replace or --outdir, output is written next to each file as NAME.leveled.EXT
 
 set -uo pipefail
 
@@ -24,9 +26,10 @@ REPLACE=0
 DENOISE=0
 STRENGTH=normal
 GUI=0
+OUTDIR=
 LOG="${XDG_CACHE_HOME:-$HOME/.cache}/level-dialogue.log"
 
-usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 files=()
 while (($#)); do
@@ -35,6 +38,7 @@ while (($#)); do
     -d|--denoise)  DENOISE=1 ;;
     -s|--strength) STRENGTH="${2:-}"; shift ;;
     -t|--target)   TARGET="${2:-}"; shift ;;
+    -o|--outdir)   OUTDIR="${2:-}"; shift ;;
     -g|--gui)      GUI=1 ;;
     -h|--help)     usage 0 ;;
     --)            shift; files+=("$@"); break ;;
@@ -96,8 +100,15 @@ process() {
   if [[ -z "$I" || "$I" == "-inf" ]]; then log "FAIL (could not measure audio / silent): $in"; return 1; fi
 
   # Pass 2: apply chain + linear loudness correction, copy everything else untouched.
-  tmp="$dir/.${base}.leveling.$$.$ext"
-  out="$dir/$base.leveled.$ext"
+  local odir="$dir" oname="$base.leveled.$ext"
+  if [[ -n "$OUTDIR" ]] && ((!REPLACE)); then
+    [[ "$OUTDIR" == /* ]] && odir="$OUTDIR" || odir="$dir/$OUTDIR"
+    mkdir -p -- "$odir" || { log "FAIL (could not create $odir): $in"; return 1; }
+    oname="$base.$ext"
+    [[ "$(realpath -- "$odir")" == "$(realpath -- "$dir")" ]] && oname="$base.leveled.$ext"
+  fi
+  tmp="$odir/.${base}.leveling.$$.$ext"
+  out="$odir/$oname"
   codec=$(audio_codec "$ext")
   local extra=()
   [[ "${ext,,}" =~ ^(mp4|mov|m4a|m4v)$ ]] && extra+=(-movflags +faststart)

@@ -1,0 +1,558 @@
+#!/usr/bin/env python3
+"""footage-tools — right-click GUI for processing video footage.
+
+Opens a window where you choose what to do with the selected files:
+  * Level dialogue (uses the bundled `level-dialogue` script; video is never re-encoded)
+  * Make editing proxies (H.264 all-intra, ProRes Proxy or DNxHR LB) in a subfolder
+
+Usage: footage-tools FILE...
+"""
+
+from __future__ import annotations
+
+import glob
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+from PyQt6.QtCore import QObject, QSettings, QThread, QUrl, Qt, pyqtSignal
+from PyQt6.QtGui import QDesktopServices, QFont, QIcon
+from PyQt6.QtWidgets import (
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QRadioButton, QStackedWidget, QVBoxLayout, QWidget,
+)
+
+APP = "Footage tools"
+HERE = Path(__file__).resolve().parent
+LEVEL_SCRIPT = HERE / "level-dialogue"
+LOG = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "footage-tools.log"
+
+
+# Proxy presets: label -> (extension, video args, audio args)
+PROXY_FORMATS = {
+    "H.264 all-intra (.mp4, small, smooth scrubbing)": (
+        "mp4",
+        ["-c:v", "libx264", "-preset", "veryfast", "-tune", "fastdecode", "-crf", "23",
+         "-g", "1", "-bf", "0", "-pix_fmt", "yuv420p"],
+        ["-c:a", "aac", "-b:a", "160k"],
+    ),
+    "ProRes 422 Proxy (.mov, larger, very light to decode)": (
+        "mov",
+        ["-c:v", "prores_ks", "-profile:v", "0", "-vendor", "apl0", "-pix_fmt", "yuv422p10le"],
+        ["-c:a", "pcm_s16le"],
+    ),
+    "DNxHR LB (.mov, larger, very light to decode)": (
+        "mov",
+        ["-c:v", "dnxhd", "-profile:v", "dnxhr_lb", "-pix_fmt", "yuv422p"],
+        ["-c:a", "pcm_s16le"],
+    ),
+}
+PROXY_SIZES = {"540p": 540, "720p": 720, "1080p": 1080, "Quarter of original": -4, "Half of original": -2}
+
+
+def log(msg: str) -> None:
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a") as f:
+        f.write(f"[{time.strftime('%F %T')}] {msg}\n")
+
+
+def probe(path: Path) -> dict:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "stream=codec_type,width,height:stream_side_data=rotation:format=duration",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+        data = json.loads(out or "{}")
+    except Exception:
+        data = {}
+    streams = data.get("streams", [])
+    v = next((s for s in streams if s.get("codec_type") == "video" and s.get("width")), None)
+    info = {
+        "has_audio": any(s.get("codec_type") == "audio" for s in streams),
+        "has_video": v is not None,
+        "duration": float(data.get("format", {}).get("duration") or 0),
+        "width": 0, "height": 0,
+    }
+    if v:
+        w, h = int(v["width"]), int(v["height"])
+        rot = 0
+        for sd in v.get("side_data_list", []) or []:
+            if "rotation" in sd:
+                rot = abs(int(sd["rotation"]))
+        if rot in (90, 270):
+            w, h = h, w
+        info["width"], info["height"] = w, h
+    return info
+
+
+def proxy_dims(w: int, h: int, size: int) -> tuple[int, int]:
+    """Scale so the short side matches `size` (or a fraction of the original), never upscale."""
+    if size < 0:
+        tw, th = w / -size, h / -size
+    else:
+        short = min(w, h)
+        f = min(1.0, size / short) if short else 1.0
+        tw, th = w * f, h * f
+    even = lambda x: max(2, int(round(x / 2)) * 2)
+    return even(tw), even(th)
+
+
+@dataclass
+class Job:
+    level: bool
+    strength: str
+    denoise: bool
+    target: float
+    out_mode: str          # "beside" | "subfolder" | "replace"
+    level_folder: str
+    proxy: bool
+    proxy_format: str
+    proxy_size: str
+    proxy_folder: str
+    proxy_overwrite: bool
+
+
+class Worker(QObject):
+    file_started = pyqtSignal(int, str, str)       # index, name, step
+    file_progress = pyqtSignal(int)                # 0-100, or -1 for busy
+    message = pyqtSignal(str)
+    finished = pyqtSignal(int, int, list, list)    # ok, total, failed, output folders
+
+    def __init__(self, files: list[Path], job: Job):
+        super().__init__()
+        self.files, self.job = files, job
+        self.proc: subprocess.Popen | None = None
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+        if self.proc and self.proc.poll() is None:
+            try:
+                os.killpg(self.proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+    def _popen(self, cmd: list[str], **kw) -> subprocess.Popen:
+        self.proc = subprocess.Popen(cmd, start_new_session=True, text=True, **kw)
+        return self.proc
+
+    # -- dialogue leveling ---------------------------------------------------
+    def level(self, src: Path) -> tuple[str, Path | None]:
+        j = self.job
+        cmd = [str(LEVEL_SCRIPT), "--strength", j.strength, "--target", f"{j.target:g}"]
+        if j.denoise:
+            cmd.append("--denoise")
+        if j.out_mode == "replace":
+            cmd.append("--replace")
+            out = src
+        elif j.out_mode == "subfolder":
+            cmd += ["--outdir", j.level_folder]
+            out = src.parent / j.level_folder / src.name
+        else:
+            out = src.with_name(f"{src.stem}.leveled{src.suffix}")
+        cmd += ["--", str(src)]
+        self.file_progress.emit(-1)
+        p = self._popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        _, err = p.communicate()
+        if self.cancelled:
+            # remove the half-written temp file the script leaves behind when killed
+            for t in glob.glob(str(out.parent / f".{glob.escape(src.stem)}.leveling.*")):
+                Path(t).unlink(missing_ok=True)
+            return "cancelled", None
+        lines = [l for l in err.splitlines() if l.startswith(("OK", "SKIP", "FAIL"))]
+        status = lines[-1] if lines else (err.strip().splitlines() or ["FAIL (unknown error)"])[-1]
+        self.message.emit("    " + status)
+        if status.startswith("OK"):
+            return "ok", out
+        if status.startswith("SKIP"):
+            return "skip", None
+        return "fail", None
+
+    # -- proxies -------------------------------------------------------------
+    def make_proxy(self, src: Path, info: dict) -> str:
+        j = self.job
+        ext, vargs, aargs = PROXY_FORMATS[j.proxy_format]
+        pdir = src.parent / j.proxy_folder
+        out = pdir / f"{src.stem}.{ext}"
+        if out.exists() and not j.proxy_overwrite:
+            self.message.emit(f"    SKIP proxy (already exists): {out}")
+            return "skip"
+        pdir.mkdir(parents=True, exist_ok=True)
+        w, h = proxy_dims(info["width"], info["height"], PROXY_SIZES[j.proxy_size])
+        tmp = pdir / f".{src.stem}.proxy-tmp.{ext}"
+        cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+               "-progress", "pipe:1", "-nostats", "-i", str(src),
+               "-map", "0:v:0", "-map", "0:a?", "-vf", f"scale={w}:{h}:flags=bicubic",
+               *vargs, *aargs, "-map_metadata", "0"]
+        if ext in ("mp4", "mov"):
+            cmd += ["-movflags", "+faststart"]
+        cmd.append(str(tmp))
+        p = self._popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        dur = info["duration"] or 0
+        for line in p.stdout:
+            if line.startswith("out_time_us=") and dur:
+                try:
+                    t = int(line.split("=", 1)[1]) / 1e6
+                    self.file_progress.emit(min(100, int(t / dur * 100)))
+                except ValueError:
+                    pass
+        err = p.stderr.read()
+        p.wait()
+        if self.cancelled:
+            tmp.unlink(missing_ok=True)
+            return "cancelled"
+        if p.returncode != 0:
+            tmp.unlink(missing_ok=True)
+            log(f"PROXY FAIL {src}: {err.strip()}")
+            self.message.emit(f"    FAIL proxy (see {LOG})")
+            return "fail"
+        try:
+            shutil.copystat(src, tmp)  # keep original modification time
+        except OSError:
+            pass
+        tmp.replace(out)
+        log(f"PROXY OK {out} ({w}x{h})")
+        self.message.emit(f"    OK proxy {w}x{h}: {out}")
+        return "ok"
+
+    def run(self) -> None:
+        ok, failed, folders = 0, [], []
+        total = len(self.files)
+        for i, f in enumerate(self.files):
+            if self.cancelled:
+                break
+            self.message.emit(f"[{i + 1}/{total}] {f.name}")
+            good = True
+            src = f
+            if self.job.level:
+                self.file_started.emit(i, f.name, "Leveling dialogue")
+                st, out = self.level(f)
+                if st == "cancelled":
+                    break
+                if st == "fail":
+                    good = False
+                if out:
+                    src = out
+                    folders.append(out.parent)
+            if self.job.proxy and good:
+                info = probe(src)
+                if not info["has_video"]:
+                    self.message.emit("    SKIP proxy (no video stream)")
+                else:
+                    self.file_started.emit(i, f.name, "Making proxy")
+                    st = self.make_proxy(src, info)
+                    if st == "cancelled":
+                        break
+                    if st == "fail":
+                        good = False
+                    else:
+                        folders.append(src.parent / self.job.proxy_folder)
+            if good:
+                ok += 1
+            else:
+                failed.append(f.name)
+        if self.cancelled:
+            self.message.emit("Cancelled.")
+        uniq = list(dict.fromkeys(str(p) for p in folders if p.is_dir()))
+        self.finished.emit(ok, total, failed, uniq)
+
+
+class Window(QWidget):
+    def __init__(self, files: list[Path]):
+        super().__init__()
+        self.files = files
+        self.settings = QSettings("footage-tools", "footage-tools")
+        self.setWindowTitle(f"{APP} — {len(files)} file(s)")
+        self.setWindowIcon(QIcon.fromTheme("video-x-generic"))
+        self.resize(620, 640)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._build_options())
+        self.stack.addWidget(self._build_progress())
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.stack)
+        self._load()
+
+    # -- page 1: options -----------------------------------------------------
+    def _build_options(self) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
+
+        lst = QListWidget()
+        lst.addItems([f.name for f in self.files])
+        lst.setMaximumHeight(110)
+        v.addWidget(QLabel(f"<b>{len(self.files)} file(s)</b> in {self._common_dir()}"))
+        v.addWidget(lst)
+
+        # Level dialogue
+        self.level_box = QGroupBox("Level dialogue")
+        self.level_box.setCheckable(True)
+        fl = QFormLayout(self.level_box)
+        self.strength = QComboBox()
+        self.strength.addItems(["gentle", "normal", "strong"])
+        fl.addRow("Strength:", self.strength)
+        self.target = QDoubleSpinBox()
+        self.target.setRange(-30, -8)
+        self.target.setSingleStep(1)
+        self.target.setDecimals(1)
+        self.target.setSuffix(" LUFS")
+        fl.addRow("Loudness target:", self.target)
+        self.denoise = QCheckBox("Light noise reduction (for hissy or noisy audio)")
+        fl.addRow("", self.denoise)
+
+        self.out_group = QButtonGroup(self)
+        self.out_beside = QRadioButton("Beside originals (NAME.leveled.ext)")
+        self.out_sub = QRadioButton("Into a subfolder:")
+        self.out_replace = QRadioButton("Replace originals (originals go to the Trash)")
+        self.level_folder = QLineEdit()
+        for i, b in enumerate((self.out_sub, self.out_beside, self.out_replace)):
+            self.out_group.addButton(b, i)
+        sub_row = QHBoxLayout()
+        sub_row.addWidget(self.out_sub)
+        sub_row.addWidget(self.level_folder)
+        out_w = QWidget()
+        ov = QVBoxLayout(out_w)
+        ov.setContentsMargins(0, 0, 0, 0)
+        ov.addLayout(sub_row)
+        ov.addWidget(self.out_beside)
+        ov.addWidget(self.out_replace)
+        fl.addRow("Save to:", out_w)
+        self.out_sub.toggled.connect(self.level_folder.setEnabled)
+        v.addWidget(self.level_box)
+
+        # Proxies
+        self.proxy_box = QGroupBox("Make editing proxies")
+        self.proxy_box.setCheckable(True)
+        pl = QFormLayout(self.proxy_box)
+        self.proxy_format = QComboBox()
+        self.proxy_format.addItems(PROXY_FORMATS.keys())
+        pl.addRow("Format:", self.proxy_format)
+        self.proxy_size = QComboBox()
+        self.proxy_size.addItems(PROXY_SIZES.keys())
+        pl.addRow("Size:", self.proxy_size)
+        self.proxy_folder = QLineEdit()
+        pl.addRow("Subfolder:", self.proxy_folder)
+        self.proxy_overwrite = QCheckBox("Overwrite existing proxies")
+        pl.addRow("", self.proxy_overwrite)
+        note = QLabel("Proxies are named like the clip they belong to (the leveled file when "
+                      "leveling is on), so editors can match them automatically.")
+        note.setWordWrap(True)
+        note.setEnabled(False)  # greyed-out hint text
+        pl.addRow(note)
+        v.addWidget(self.proxy_box)
+
+        v.addStretch()
+        btns = QHBoxLayout()
+        btns.addStretch()
+        cancel = QPushButton(QIcon.fromTheme("dialog-cancel"), "Close")
+        cancel.clicked.connect(self.close)
+        self.run_btn = QPushButton(QIcon.fromTheme("media-playback-start"), "Run")
+        self.run_btn.setDefault(True)
+        self.run_btn.clicked.connect(self.start)
+        btns.addWidget(cancel)
+        btns.addWidget(self.run_btn)
+        v.addLayout(btns)
+
+        for w in (self.level_box, self.proxy_box):
+            w.toggled.connect(self._update_run)
+        return page
+
+    # -- page 2: progress ----------------------------------------------------
+    def _build_progress(self) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        self.status = QLabel("Starting…")
+        f = self.status.font()
+        f.setBold(True)
+        self.status.setFont(f)
+        v.addWidget(self.status)
+        v.addWidget(QLabel("Current file:"))
+        self.bar_file = QProgressBar()
+        v.addWidget(self.bar_file)
+        v.addWidget(QLabel("Overall:"))
+        self.bar_all = QProgressBar()
+        self.bar_all.setMaximum(len(self.files))
+        v.addWidget(self.bar_all)
+        self.logview = QPlainTextEdit()
+        self.logview.setReadOnly(True)
+        self.logview.setFont(QFont("monospace", 9))
+        v.addWidget(self.logview)
+        row = QHBoxLayout()
+        self.open_btn = QPushButton(QIcon.fromTheme("folder-open"), "Open output folder")
+        self.open_btn.setVisible(False)
+        self.open_btn.clicked.connect(self._open_folders)
+        self.stop_btn = QPushButton(QIcon.fromTheme("process-stop"), "Cancel")
+        self.stop_btn.clicked.connect(self._stop)
+        row.addWidget(self.open_btn)
+        row.addStretch()
+        row.addWidget(self.stop_btn)
+        v.addLayout(row)
+        return page
+
+    # -- settings ------------------------------------------------------------
+    def _load(self) -> None:
+        s = self.settings
+        b = lambda k, d: s.value(k, d, type=bool)
+        self.level_box.setChecked(b("level/enabled", True))
+        self.strength.setCurrentText(s.value("level/strength", "normal"))
+        self.target.setValue(float(s.value("level/target", -14)))
+        self.denoise.setChecked(b("level/denoise", False))
+        mode = s.value("level/out_mode", "subfolder")
+        {"subfolder": self.out_sub, "beside": self.out_beside, "replace": self.out_beside}[mode].setChecked(True)
+        self.level_folder.setText(s.value("level/folder", "Leveled"))
+        self.level_folder.setEnabled(self.out_sub.isChecked())
+        self.proxy_box.setChecked(b("proxy/enabled", False))
+        fmt = s.value("proxy/format", next(iter(PROXY_FORMATS)))
+        if fmt in PROXY_FORMATS:
+            self.proxy_format.setCurrentText(fmt)
+        self.proxy_size.setCurrentText(s.value("proxy/size", "540p"))
+        self.proxy_folder.setText(s.value("proxy/folder", "Proxy"))
+        self.proxy_overwrite.setChecked(b("proxy/overwrite", False))
+        self._update_run()
+
+    def _job(self) -> Job:
+        mode = "subfolder" if self.out_sub.isChecked() else "replace" if self.out_replace.isChecked() else "beside"
+        return Job(
+            level=self.level_box.isChecked(), strength=self.strength.currentText(),
+            denoise=self.denoise.isChecked(), target=self.target.value(), out_mode=mode,
+            level_folder=self.level_folder.text().strip() or "Leveled",
+            proxy=self.proxy_box.isChecked(), proxy_format=self.proxy_format.currentText(),
+            proxy_size=self.proxy_size.currentText(),
+            proxy_folder=self.proxy_folder.text().strip() or "Proxy",
+            proxy_overwrite=self.proxy_overwrite.isChecked(),
+        )
+
+    def _save(self, j: Job) -> None:
+        s = self.settings
+        s.setValue("level/enabled", j.level)
+        s.setValue("level/strength", j.strength)
+        s.setValue("level/target", j.target)
+        s.setValue("level/denoise", j.denoise)
+        # "replace" is deliberately never remembered, so it can't happen by accident next time
+        s.setValue("level/out_mode", j.out_mode if j.out_mode != "replace" else "subfolder")
+        s.setValue("level/folder", j.level_folder)
+        s.setValue("proxy/enabled", j.proxy)
+        s.setValue("proxy/format", j.proxy_format)
+        s.setValue("proxy/size", j.proxy_size)
+        s.setValue("proxy/folder", j.proxy_folder)
+        s.setValue("proxy/overwrite", j.proxy_overwrite)
+
+    def _update_run(self) -> None:
+        self.run_btn.setEnabled(self.level_box.isChecked() or self.proxy_box.isChecked())
+
+    def _common_dir(self) -> str:
+        try:
+            d = os.path.commonpath([str(f.parent) for f in self.files])
+        except ValueError:
+            return "several folders"
+        return d.replace(str(Path.home()), "~", 1)
+
+    # -- running -------------------------------------------------------------
+    def start(self) -> None:
+        j = self._job()
+        for name in (j.level_folder, j.proxy_folder):
+            if "/" in name or name in (".", ".."):
+                QMessageBox.warning(self, APP, f"Subfolder name must be a plain folder name, not “{name}”.")
+                return
+        if j.level and j.out_mode == "replace":
+            r = QMessageBox.warning(
+                self, APP, f"Replace {len(self.files)} original file(s)?\n\nOriginals will be moved to the Trash.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            if r != QMessageBox.StandardButton.Yes:
+                return
+        self._save(j)
+        self.stack.setCurrentIndex(1)
+        self.thread = QThread()
+        self.worker = Worker(self.files, j)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.file_started.connect(self._on_file)
+        self.worker.file_progress.connect(self._on_progress)
+        self.worker.message.connect(self.logview.appendPlainText)
+        self.worker.finished.connect(self._on_done)
+        self.worker.finished.connect(self.thread.quit)
+        self.thread.start()
+
+    def _on_file(self, i: int, name: str, step: str) -> None:
+        self.status.setText(f"{step}: {name}  ({i + 1}/{len(self.files)})")
+        self.bar_all.setValue(i)
+        self.bar_file.setRange(0, 100)
+        self.bar_file.setValue(0)
+
+    def _on_progress(self, p: int) -> None:
+        if p < 0:
+            self.bar_file.setRange(0, 0)  # busy indicator
+        else:
+            self.bar_file.setRange(0, 100)
+            self.bar_file.setValue(p)
+
+    def _on_done(self, ok: int, total: int, failed: list, folders: list) -> None:
+        self.done = True
+        self.folders = folders
+        self.bar_file.setRange(0, 100)
+        self.bar_file.setValue(100 if not self.worker.cancelled else 0)
+        self.bar_all.setValue(ok + len(failed))
+        msg = "Cancelled. " if self.worker.cancelled else ""
+        msg += f"{ok} of {total} file(s) done."
+        if failed:
+            msg += f"  {len(failed)} failed (details in {LOG} and ~/.cache/level-dialogue.log)."
+        self.status.setText(msg)
+        self.logview.appendPlainText("\n" + msg)
+        self.stop_btn.setText("Close")
+        self.stop_btn.setIcon(QIcon.fromTheme("dialog-close"))
+        self.open_btn.setVisible(bool(folders))
+        if not self.isActiveWindow():
+            subprocess.Popen(["notify-send", "-a", APP, "-i", "video-x-generic", APP, msg],
+                             stderr=subprocess.DEVNULL)
+
+    def _open_folders(self) -> None:
+        for d in self.folders[:3]:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(d))
+
+    def _stop(self) -> None:
+        if getattr(self, "done", False):
+            self.close()
+            return
+        self.stop_btn.setEnabled(False)
+        self.status.setText("Cancelling…")
+        self.worker.cancel()
+
+    def closeEvent(self, e) -> None:
+        if hasattr(self, "worker") and not getattr(self, "done", False):
+            r = QMessageBox.question(self, APP, "Processing is still running. Cancel it and close?")
+            if r != QMessageBox.StandardButton.Yes:
+                e.ignore()
+                return
+            self.worker.cancel()
+            self.thread.quit()
+            self.thread.wait(5000)
+        e.accept()
+
+
+def main() -> int:
+    files = [Path(a).resolve() for a in sys.argv[1:] if not a.startswith("-")]
+    if any(a in ("-h", "--help") for a in sys.argv[1:]) or not files:
+        print(__doc__.strip())
+        return 0 if files or "-h" in sys.argv or "--help" in sys.argv else 1
+    files = [f for f in dict.fromkeys(files) if f.is_file()]
+    app = QApplication(sys.argv[:1])
+    app.setApplicationName("footage-tools")
+    app.setDesktopFileName("footage-tools")
+    if not files:
+        QMessageBox.warning(None, APP, "None of the selected items are files.")
+        return 1
+    w = Window(files)
+    w.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
